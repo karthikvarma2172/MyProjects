@@ -1,0 +1,430 @@
+Installing Kubernetes Cluster:
+===================================
+Launch 2 EC2 Instances using Ubuntu 20.04 LTS
+1 (t2.medium) Master
+1 (t2.medium) Worker
+
+1 Security Group with below inbound rules:
+================================================
+Type		Protocol 	Port range	Source
+--------------------------------------------------------------
+HTTP		tcp		80		0.0.0.0/0
+Custom TCP	tcp		8080		0.0.0.0/0
+Custom TCP	tcp		6443		0.0.0.0/0
+ssh		tcp		22		0.0.0.0/0
+Custom TCP	tcp		10250		0.0.0.0/0
+HTTPS		tcp		443		0.0.0.0/0
+
+
+Update and Upgrade Ubuntu (all nodes)
+=======================================
+$ sudo apt update
+$ sudo apt upgrade -y
+
+Install Docker Package (all nodes)
+=====================================
+$ sudo apt install docker.io -y
+
+
+Add kernel Parameters (all nodes)
+=======================================
+Load the following kernel modules on all the nodes:
+-----------------------------------------------------
+$ sudo tee /etc/modules-load.d/containerd.conf <<EOF
+overlay
+br_netfilter
+EOF
+$ sudo modprobe overlay
+$ sudo modprobe br_netfilter
+
+Set the following Kernel parameters for Kubernetes, run beneath tee command:
+-------------------------------------------------------------------------------
+$ sudo tee /etc/sysctl.d/kubernetes.conf <<EOT
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOT
+
+Reload the above changes, run:
+--------------------------------
+$ sudo sysctl --system
+
+
+Install Containerd Runtime (all nodes)
+=========================================
+Install dependencies:
+------------------------
+$ sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
+
+Enable docker repository:
+----------------------------
+$ sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmour -o /etc/apt/trusted.gpg.d/docker.gpg
+$ sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+->When prompted for confirmation press "Enter" key to proceed.
+
+Update Apt Repository and Install containerd:
+-----------------------------------------------
+$ sudo apt update
+$ sudo apt install -y containerd.io
+
+Configure containerd so that it starts using systemd as cgroup:
+--------------------------------------------------------------------
+$ containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
+$ sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+
+Restart and enable containerd service:
+-------------------------------------------
+$ sudo systemctl restart containerd
+$ sudo systemctl enable containerd
+
+
+Add Apt Repository for Kubernetes (all nodes)
+==================================================
+Download public signing key:
+---------------------------------
+$ curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+Run echo command to add Kubernetes apt repository:
+-----------------------------------------------------
+$ echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+Note: At the time of writing this guide, Kubernetes v1.28 was available, replace this version with new higher version if available.
+
+Install Kubectl, Kubeadm and Kubelet (all nodes)
+====================================================
+$ sudo apt update
+$ sudo apt install -y kubelet kubeadm kubectl
+$ sudo apt-mark hold kubelet kubeadm kubectl
+
+
+Initialize Kubernetes Cluster (in Master node)
+=================================================
+$ sudo kubeadm init 
+
+-> After the initialization is complete, you will see a message with instructions on how to join worker nodes to the cluster. Make a note of the kubeadm join command for future reference.
+
+kubeadm join 172.31.57.198:6443 --token 4l40n9.65k3zsyhgrazs8lk \
+        --discovery-token-ca-cert-hash sha256:3409e51038248f4a20b1179cd422a35d8350157fc7b6aac162c562b5d4ff3d8b
+
+To start interacting with cluster, run following commands on the master node:
+---------------------------------------------------------------------------------
+$ mkdir -p $HOME/.kube
+$ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+$ sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+View cluster and node status on master node:
+----------------------------------------------
+$ kubectl cluster-info
+$ kubectl get nodes
+
+Output:
+---------
+NAME               STATUS   ROLES           AGE   VERSION
+ip-172-31-90-70    Not Ready    control-plane   1m   v1.28.8
+
+
+Join Worker Nodes to the Cluster:
+======================================
+In each worker node, use the kubeadm join command you noted down earlier after initializing the master node . It should look something like this:
+$ sudo kubeadm join 172.31.90.70:6443 --token lh8tm1.gq2cisri7sb6ucfk \
+        --discovery-token-ca-cert-hash sha256:35141ba984ba340a6bc7c56092f4bad0ed4b179e46735d8efaa9f22ca9ed8481
+ 
+Check the nodes status from master node using kubectl command:
+-----------------------------------------------------------------
+$ kubectl get nodes
+
+Output:
+---------
+NAME               STATUS   ROLES           AGE   VERSION
+ip-172-31-90-70    Not Ready    control-plane   2m   v1.28.8
+ip-172-31-91-114   Not Ready    <none>          35s   v1.28.8
+
+-> The nodes status will be ‘NotReady’, so to make it active we must install CNI (Container Network Interface) or network add-on plugins like Calico, Flannel and Weave-net.
+
+
+Install Calico Network Plugin (in Master node)
+===================================================
+$ kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
+ 
+Now, check the nodes status as well.
+$ kubectl get nodes
+
+Output:
+---------
+NAME               STATUS   ROLES           AGE   VERSION
+ip-172-31-90-70    Ready    control-plane   5m   v1.28.8
+ip-172-31-91-114   Ready    <none>          3m   v1.28.8
+
+-> Great, above confirms that nodes are active node. Now, we can say that our Kubernetes cluster is functional.
+
+
+Kubernetes Pods
+====================
+-> A pod is a collection of containers and it is stored inside a node of a Kubernetes cluster.
+-> It is possible to create a pod with multiple containers inside it.
+-> For example, keeping a database container and data container in the same pod.
+
+Types of Pod:
+----------------
+There are two types of Pods
+- Single container pod
+- Multi container pod 
+
+
+Ex: for Single Container Pod
+--------------------------------
+# vi PodExample1.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:latest
+      ports:
+      - containerPort: 80
+
+Execute:
+------------
+# kubectl create -f PodExample1.yml
+# kubectl get pods
+
+To Delete a POD:
+------------------
+# kubectl delete pod <pod-name>
+# kubectl delete pod nginx-pod
+
+
+Ex: for Multi Container Pod
+-----------------------------
+# vi PodExample2.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: multi-container-pod
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:latest
+    - name: python-container
+      image: python:3
+      command: [ "python", "-c", "while True: print('Hello from Python!')" ]
+
+Execute:
+-----------
+# kubectl create -f PodExample2.yml
+# kubectl get pods
+# kubectl logs multi-container-pod -c python-container
+
+** Note: To get the logs or execute some commands from the containers running in the nodes, allow PORT # 10250 from anywhere in Node instance's Security Group by adding a rule in it with type "Custom TCP" port "10250" and source "Anywhere IPv4"
+
+# kubectl delete pod multi-container-pod
+
+
+Ex: Multi Container pod
+---------------------------
+# vi PodExample3.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mc1
+spec:
+  volumes:
+  - name: html
+    emptyDir: {}
+  containers:
+  - name: 1st
+    image: nginx
+    volumeMounts:
+    - name: html
+      mountPath: /usr/share/nginx/html
+  - name: 2nd
+    image: debian
+    volumeMounts:
+    - name: html
+      mountPath: /html
+    command: ["/bin/sh", "-c"]
+    args: [while true; do date >> /html/index.html; sleep 1; done]
+
+Execute:
+------------
+# kubectl create -f PodExample3.yml
+# kubectl get pods
+# kubectl exec mc1 -c 1st -- /bin/cat /usr/share/nginx/html/index.html
+# kubectl exec mc1 -c 2nd -- /bin/cat /html/index.html
+# kubectl delete pod mc1
+
+
+Kubernetes - Replication Controller
+======================================
+-> A Replication Controller (RC) is a supervisor for long-running pods.
+-> An RC will launch a specified number of pods called replicas and makes sure that they keep running.
+-> For example, when a node fails or something inside of a pod i.e., when one of its container goes wrong.
+
+
+Example:
+------------
+# vi ReplicationCtrl1.yml
+
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: simple-rc
+spec:
+  replicas: 3
+  selector:
+    app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+        ver: "1.0"
+    spec:
+      containers:
+      - name: simple-pod
+        image: nginx
+        ports:
+        - containerPort: 80
+
+Execution:
+---------------
+# kubectl apply -f ReplicationCtrl1.yml
+# kubectl get rc
+# kubectl get pods --show-labels
+# kubectl scale --replicas=5 rc/simple-rc
+# kubectl get pods -l app=nginx
+# kubectl delete rc simple-rc
+
+
+Kubernetes Services
+========================
+Kubernetes Services are a fundamental concept in Kubernetes that allow you to expose your applications to the network and enable communication between different parts of your application. They act as an abstraction layer over pods, providing a stable network endpoint for accessing your application components.
+
+In Kubernetes, there are four main types of Services:
+
+-> ClusterIP: 
+--------------
+This is the default type. It provides a stable internal IP address within the cluster to access the service. It's useful for communication between different parts of your application.
+
+-> NodePort: 
+--------------
+This type exposes your service on a static port on each node's IP address. It allows external access to your service by mapping a port from the node to the service. It's often used during development and testing.
+
+-> LoadBalancer: 
+------------------
+This type provisions a cloud load balancer (e.g., AWS ELB, GCP Load Balancer) to distribute traffic to multiple pods in your service. It's suitable for exposing your application to the internet.
+
+-> ExternalName: 
+---------------------
+This type maps the service to an external DNS name. It's typically used when you want to provide a service with a name outside your cluster, like a database or external API.
+
+Let's dive into examples for each of these service types:
+
+ClusterIP Service Example:
+--------------------------------
+Suppose you have a simple web application deployed as a set of pods. To create a ClusterIP service for it, you can use the following YAML definition:
+
+# vi ClusterIPService.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-clusterip-service
+spec:
+  selector:
+    app: my-clusterip-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+
+    metadata.name defines the name of the service.
+    spec.selector selects the pods to include in the service.
+    spec.ports specifies the port configuration.
+
+You can create the service using kubectl:
+
+# kubectl apply -f ClusterIPService.yml
+# kubectl get services
+# kubectl delete service my-clusterip-service
+
+
+NodePort Service Example:
+------------------------------
+Let's say you want to expose the same web application externally via NodePort. You can modify the previous YAML like this:
+
+# vi NodePortService.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-nodeport-service
+spec:
+  selector:
+    app: my-nodeport-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: NodePort
+
+Now, when you apply this YAML, Kubernetes will assign a random port on each node, and you can access your service using any node's IP and the assigned port.
+
+# kubectl apply -f NodePortService.yml
+# kubectl get services
+# kubectl delete service my-nodeport-service
+
+
+LoadBalancer Service Example:
+-------------------------------
+For external access with a LoadBalancer, your YAML may look like this:
+
+# vi LoadBalancerService.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-loadbalancer-service
+spec:
+  selector:
+    app: my-loadbalancer-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer
+
+Once you apply this YAML, Kubernetes (and your cloud provider) will provision a load balancer, and you'll receive an external IP to access your service.
+
+# kubectl apply -f LoadBalancerService.yml
+# kubectl get services
+# kubectl delete service my-loadbalancer-service
+
+
+ExternalName Service Example:
+---------------------------------
+If you want to map your service to an external DNS name, you can define an ExternalName service:
+
+# vi ExternalNameService.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-db
+spec:
+  type: ExternalName
+  externalName: db.example.com
+
+This service allows you to use the DNS name external-db to access db.example.com. You can replace db.example.com with your actual application labels and external DNS names.
+
+# kubectl apply -f ExternalNameService.yml
+# kubectl get services
+# kubectl delete service external-db
+
+
+
+
